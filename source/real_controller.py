@@ -56,6 +56,8 @@ class AimDKController(Node):
         self.received = {key: 0.0 for key in (*self.groups, "imu", "mode")}
         self.mode, self.mode_status = "", 0
         self.target_time = 0.0
+        self.discovery_started = time.monotonic()
+        self.hold_on_exit = False
         self.thread: Thread | None = None
         self.publishers_by_group = {}
         self.sequence = 0
@@ -74,15 +76,19 @@ class AimDKController(Node):
 
     def _on_joints(self, group: str, msg: JointStateArray) -> None:
         try:
-            if msg.state.value in (1, 2, 3, 4):
-                raise RuntimeError(f"HAL {group} fault state: {msg.state.value}")
+            # AIMDK message revisions differ: newer arrays may expose a HAL
+            # state, while the X2 v1.1 message on the robot has only header/joints.
+            state = getattr(msg, "state", None)
+            state_value = getattr(state, "value", None)
+            if state_value in (1, 2, 3, 4):
+                raise RuntimeError(f"HAL {group} fault state: {state_value}")
             ids = self.groups[group]
             # Named feedback may arrive in another order. Empty names use SDK order.
             joints = {joint.name or self.robot.joint_names[i]: joint for i, joint in zip(ids, msg.joints)}
             active_ids = [i for i in ids if self.active[i]]
             samples = [joints[self.robot.joint_names[i]] for i in active_ids]
             values = np.asarray([(joint.position, joint.velocity) for joint in samples], dtype=np.float32)
-            if not np.isfinite(values).all() or any(joint.error_code for joint in samples):
+            if not np.isfinite(values).all() or any(getattr(joint, "error_code", 0) for joint in samples):
                 raise RuntimeError(f"Invalid or faulty HAL {group} joint feedback")
             with self.lock:
                 self.q[active_ids], self.dq[active_ids] = values.T
@@ -111,7 +117,9 @@ class AimDKController(Node):
             self.received["mode"] = time.monotonic()
 
     def wait_for_state(self, timeout: float = 10.0) -> None:
-        required = (*self.groups, "imu") if self.dry_run else tuple(self.received)
+        # On the original X2, stopping native MC does not change the SM label.
+        # Control ownership is checked against the command publishers in start().
+        required = (*self.groups, "imu")
         deadline = time.monotonic() + timeout
         while True:
             with self.lock:
@@ -126,9 +134,23 @@ class AimDKController(Node):
                 raise TimeoutError(f"Missing HAL feedback: {', '.join(missing)}")
             time.sleep(0.01)
 
-    def _mode_ready(self) -> bool:
-        return (self.mode == "Develop_MC" and self.mode_status == 1
-                and time.monotonic() - self.received["mode"] < 3.0)
+    def _check_command_ownership(self) -> None:
+        allowed = 1 if self.publishers_by_group else 0
+        conflicts = {}
+        for group in self.groups:
+            topic = f"/aima/hal/joint/{group}/command"
+            owners = self.get_publishers_info_by_topic(topic)
+            foreign = any(owner.node_name != self.get_name()
+                          or owner.node_namespace != self.get_namespace() for owner in owners)
+            if len(owners) > allowed or (allowed and foreign):
+                conflicts[group] = [f"{owner.node_namespace.rstrip('/')}/{owner.node_name}" for owner in owners]
+        if conflicts:
+            raise RuntimeError(
+                f"HAL command publisher conflict: {conflicts}. "
+                "On PC1, run 'aima em stop-app mc' before live deployment; "
+                "wait for all native command publishers to disappear. "
+                f"Current system mode: {self.mode or 'unknown'} / {self.mode_status}"
+            )
 
     def read_state(self) -> RobotState:
         now = time.monotonic()
@@ -138,10 +160,10 @@ class AimDKController(Node):
             stale = [key for key in (*self.groups, "imu") if now - self.received[key] > self.state_timeout]
             if stale:
                 raise TimeoutError(f"Stale HAL feedback: {', '.join(stale)}")
-            if not self.dry_run and not self._mode_ready():
-                raise RuntimeError("Develop_MC / IN_READY required; switch mode with the official SDK first")
             q, dq, omega = self.q.copy(), self.dq.copy(), self.omega.copy()
             pelvis_quat = quat_multiply(self.heading, self.pelvis_quat)
+        if not self.dry_run and self.publishers_by_group:
+            self._check_command_ownership()
         return RobotState(q, dq, omega, torso_orientation(pelvis_quat, q[self.waist_ids]))
 
     def align_heading(self, reference_root_quat: np.ndarray) -> None:
@@ -166,10 +188,21 @@ class AimDKController(Node):
             with self.lock:
                 self.target_time = time.monotonic()
 
+    def check_control_ownership(self) -> None:
+        """Read-only preflight; do not create any command publisher."""
+        # Allow DDS discovery before deciding whether native MC is absent.
+        while time.monotonic() - self.discovery_started < 2.0:
+            self.read_state()
+            time.sleep(0.01)
+        self.read_state()
+        self._check_command_ownership()
+
     def start(self) -> None:
         if self.dry_run:
             return
-        self.read_state()
+        if self.publishers_by_group:
+            raise RuntimeError("Real control has already started")
+        self.check_control_ownership()
         self.publishers_by_group = {
             group: self.create_publisher(
                 JointCommandArray, f"/aima/hal/joint/{group}/command", qos_profile_sensor_data,
@@ -209,21 +242,32 @@ class AimDKController(Node):
                 self.fault = exc
             self.stopping.set()
         finally:
-            # HAL holds the last command indefinitely: explicitly replace it.
-            # Stop sending if another system mode has taken ownership.
+            # Normal completion / operator stop retains position stiffness.
+            # Capture the measured pose once, never the last policy target.
+            # Faults or stale joint measurements fall back to damping.
             try:
                 with self.command_lock:
+                    with self.lock:
+                        fresh = all(time.monotonic() - self.received[group] <= self.state_timeout
+                                    for group in self.groups)
+                        hold = self.hold_on_exit and self.fault is None and fresh
+                        targets = self.q.copy() if hold else np.zeros_like(self.q)
                     for _ in range(round(0.2 / self.robot.policy_dt)):
-                        with self.lock:
-                            ready = self._mode_ready()
-                        if not ready:
-                            break
-                        self._publish(np.zeros_like(self.q), damping=True)
+                        # Never send exit commands over another controller.
+                        self._check_command_ownership()
+                        self._publish(targets, damping=not hold)
                         time.sleep(self.robot.policy_dt)
+                    self.get_logger().info(
+                        "Exit: HAL retains measured joint positions with kp/kd (no balance control)"
+                        if hold else "Exit: damping command sent"
+                    )
             except Exception as exc:
-                self.get_logger().error(f"Could not publish exit damping: {exc}")
+                self.get_logger().error(f"Could not publish exit command: {exc}")
 
-    def stop(self) -> None:
-        self.stopping.set()
+    def stop(self, *, hold_position: bool = False) -> None:
+        with self.lock:
+            if not self.stopping.is_set():
+                self.hold_on_exit = hold_position
+                self.stopping.set()
         if self.thread is not None:
             self.thread.join()

@@ -59,16 +59,17 @@ def run_sim2sim(
 
 def run_sim2real(
     controller: AimDKController, policy: BeyondMimicPolicy,
-    *, max_steps: int = 500, prepare_seconds: float = 3.0,
+    *, max_steps: int | None = None, prepare_seconds: float = 3.0,
 ) -> int:
-    """Move to reference frame zero, then publish position targets and gains at 50 Hz."""
+    """Run motion once, then keep tracking its final reference until interrupted."""
     reference = policy.reset()
     controller.wait_for_state()
     controller.align_heading(reference.body_quat_w[policy.root_index])
+    hold_on_exit = False
     try:
         if not controller.dry_run:
-            initial = controller.read_state().joint_pos
             controller.start()
+            initial = controller.read_state().joint_pos
             ticks = max(1, round(prepare_seconds / controller.robot.policy_dt))
             deadline = time.monotonic()
             for tick in range(1, ticks + 1):
@@ -82,13 +83,21 @@ def run_sim2real(
             if np.max(np.abs(error[controller.active])) > 0.2:
                 raise RuntimeError("Robot did not reach reference frame zero (joint error > 0.2 rad)")
         deadline = time.monotonic()
-        for _ in range(max_steps):
+        step = 0
+        while max_steps is None or step < max_steps:
             targets = policy.infer(controller.read_state())
             if not controller.dry_run:
                 controller.set_target(targets)
+            step += 1
+            if step == policy.motion_frames and (max_steps is None or step < max_steps):
+                print(f"Motion complete ({policy.motion_frames} frames); tracking final reference at 50 Hz. Ctrl+C to stop.", flush=True)
             deadline += controller.robot.policy_dt
             time.sleep(max(0.0, deadline - time.monotonic()))
         controller.read_state()
-        return max_steps
+        hold_on_exit = True
+        return step
+    except KeyboardInterrupt:
+        hold_on_exit = True
+        raise
     finally:
-        controller.stop()
+        controller.stop(hold_position=hold_on_exit)

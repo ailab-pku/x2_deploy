@@ -1,0 +1,9 @@
+{
+    "python.defaultInterpreterPath": "/agibot/data/home/agi/x2_deploy_venv/bin/python",
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}",
+        "/agibot/software/common/local/lib/python3.10/dist-packages",
+        "/opt/ros/humble/local/lib/python3.10/dist-packages",
+        "/opt/ros/humble/lib/python3.10/site-packages"
+    ]
+}

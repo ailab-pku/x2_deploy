@@ -14,6 +14,28 @@ from .x2_ultra import X2UltraConfig
 OBSERVATION_DIM = 164
 
 
+def motion_frame_count(model_path: str | Path) -> int:
+    """Read the time dimension of the exported joint_pos lookup table."""
+    import onnx
+
+    model = onnx.load(str(model_path), load_external_data=False)
+    gather = next((node for node in model.graph.node
+                   if node.op_type == "Gather" and "joint_pos" in node.output), None)
+    if gather is None:
+        raise ValueError("Cannot find embedded joint_pos motion table in ONNX")
+    table_name = gather.input[0]
+    tensor = next((value for value in model.graph.initializer if value.name == table_name), None)
+    if tensor is None:
+        constant = next((node for node in model.graph.node
+                         if node.op_type == "Constant" and table_name in node.output), None)
+        if constant is not None:
+            tensor = next((attr.t for attr in constant.attribute
+                           if attr.name == "value" and attr.type == onnx.AttributeProto.TENSOR), None)
+    if tensor is None or len(tensor.dims) != 2 or tensor.dims[0] <= 0:
+        raise ValueError("Cannot determine embedded ONNX motion frame count")
+    return int(tensor.dims[0])
+
+
 @dataclass(frozen=True)
 class MotionReference:
     joint_pos: np.ndarray
@@ -32,6 +54,7 @@ class BeyondMimicPolicy:
         *, session_options: ort.SessionOptions | None = None,
     ):
         self.robot = robot
+        self.motion_frames = motion_frame_count(model_path)
         self.session = ort.InferenceSession(
             str(model_path), sess_options=session_options, providers=["CPUExecutionProvider"]
         )
@@ -89,9 +112,10 @@ class BeyondMimicPolicy:
         obs = self.observation(state)
         # The actor depends only on obs. Asking for frame+1 in the same call caches
         # the next reference and avoids running the large ONNX graph twice per tick.
-        action, *reference = self._run(obs, self.frame + 1)
+        next_frame = min(self.frame + 1, self.motion_frames - 1)
+        action, *reference = self._run(obs, next_frame)
         self.last_action = action[0].astype(np.float32, copy=True)
         self.reference = MotionReference(*(value[0] for value in reference))
-        self.frame += 1
+        self.frame = next_frame
         return self.robot.action_offset + self.robot.action_scale * self.last_action
 
