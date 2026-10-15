@@ -106,7 +106,7 @@ class X2UltraConfig:
     anchor_body_name: str = "torso_link"
     root_body_name: str = "pelvis"
     scene_path: Path = PROJECT_ROOT / "assets" / "x2_ultra" / "scene.xml"
-    default_policy_path: Path = PROJECT_ROOT / "assets" / "models" / "prepare.onnx"
+    default_policy_path: Path = PROJECT_ROOT / "assets" / "prepare.onnx"
     sim_dt: float = 0.005
     policy_dt: float = 0.02
 

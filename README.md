@@ -19,7 +19,7 @@ python -m venv .venv
 ```
 
 可用 `--policy PATH` 指定 motion-export ONNX，`--scene PATH` 指定 MuJoCo 场景。
-默认加载 `assets/models/prepare.onnx` 和 `assets/x2_ultra/scene.xml`。
+默认加载 `assets/prepare.onnx` 和 `assets/x2_ultra/scene.xml`。
 代码直接使用当前配置，不额外校验模型元数据；替换 ONNX 时需保持关节顺序、obs 布局和 action 映射一致。
 
 ## 代码
@@ -33,8 +33,8 @@ python -m venv .venv
 
 ## 当前 checkpoint 的约定
 
-Reference motion 已包含在 ONNX 中，由 `time_step` 索引；运行时不读取
-`assets/motions/prepare.npz`。初始位置和速度均取自 reference 第 0 帧。
+Reference motion 已包含在 ONNX 中，由 `time_step` 索引。
+初始位置和速度均取自 reference 第 0 帧。
 ONNX 内包含 observation normalization，部署端只构造原始 obs。
 
 164 维 obs 的顺序：
