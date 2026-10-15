@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import onnxruntime as ort
 
-from .controller import RobotState
+from .state import RobotState
 from .math_utils import quat_to_matrix, relative_orientation
 from .x2_ultra import X2UltraConfig
 
@@ -27,9 +27,14 @@ class MotionReference:
 class BeyondMimicPolicy:
     """ONNX runner matching the project's state-estimation-free policy layout."""
 
-    def __init__(self, model_path: str | Path, robot: X2UltraConfig):
+    def __init__(
+        self, model_path: str | Path, robot: X2UltraConfig,
+        *, session_options: ort.SessionOptions | None = None,
+    ):
         self.robot = robot
-        self.session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+        self.session = ort.InferenceSession(
+            str(model_path), sess_options=session_options, providers=["CPUExecutionProvider"]
+        )
         self.body_names = self.session.get_modelmeta().custom_metadata_map["body_names"].split(",")
         self.last_action = np.zeros(len(robot.joint_names), dtype=np.float32)
 

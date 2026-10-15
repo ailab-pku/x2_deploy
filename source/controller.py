@@ -1,23 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 
 import mujoco
 import numpy as np
 
 from .math_utils import quat_to_matrix
+from .state import RobotState
 from .x2_ultra import X2UltraConfig
-
-
-@dataclass(frozen=True)
-class RobotState:
-    """Policy inputs; joint arrays follow action order, quaternions use wxyz."""
-
-    joint_pos: np.ndarray
-    joint_vel: np.ndarray
-    root_ang_vel_b: np.ndarray
-    anchor_quat_w: np.ndarray
 
 
 class MujocoController:

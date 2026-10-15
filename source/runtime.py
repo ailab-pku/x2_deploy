@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import time
+from typing import TYPE_CHECKING
+
+import numpy as np
 
 from .beyond_mimic import BeyondMimicPolicy
-from .controller import MujocoController
+
+if TYPE_CHECKING:
+    from .controller import MujocoController
+    from .real_controller import AimDKController
 
 
 def run_sim2sim(
@@ -49,3 +55,40 @@ def run_sim2sim(
         if viewer is not None:
             viewer.close()
     return step
+
+
+def run_sim2real(
+    controller: AimDKController, policy: BeyondMimicPolicy,
+    *, max_steps: int = 500, prepare_seconds: float = 3.0,
+) -> int:
+    """Move to reference frame zero, then publish position targets and gains at 50 Hz."""
+    reference = policy.reset()
+    controller.wait_for_state()
+    controller.align_heading(reference.body_quat_w[policy.root_index])
+    try:
+        if not controller.dry_run:
+            initial = controller.read_state().joint_pos
+            controller.start()
+            ticks = max(1, round(prepare_seconds / controller.robot.policy_dt))
+            deadline = time.monotonic()
+            for tick in range(1, ticks + 1):
+                controller.read_state()
+                blend = tick / ticks
+                blend = blend * blend * (3.0 - 2.0 * blend)
+                controller.set_target(initial + blend * (reference.joint_pos - initial))
+                deadline += controller.robot.policy_dt
+                time.sleep(max(0.0, deadline - time.monotonic()))
+            error = controller.read_state().joint_pos - reference.joint_pos
+            if np.max(np.abs(error[controller.active])) > 0.2:
+                raise RuntimeError("Robot did not reach reference frame zero (joint error > 0.2 rad)")
+        deadline = time.monotonic()
+        for _ in range(max_steps):
+            targets = policy.infer(controller.read_state())
+            if not controller.dry_run:
+                controller.set_target(targets)
+            deadline += controller.robot.policy_dt
+            time.sleep(max(0.0, deadline - time.monotonic()))
+        controller.read_state()
+        return max_steps
+    finally:
+        controller.stop()
