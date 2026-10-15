@@ -6,35 +6,46 @@ from .beyond_mimic import BeyondMimicPolicy
 from .controller import MujocoController
 
 
-class Sim2SimRunner:
-    def __init__(self, controller: MujocoController, policy: BeyondMimicPolicy):
-        self.controller = controller
-        self.policy = policy
+def run_sim2sim(
+    controller: MujocoController, policy: BeyondMimicPolicy,
+    *, headless: bool = False, max_steps: int | None = None,
+) -> int:
+    """Restore reference frame zero, then run policy and PD control."""
+    reference = policy.reset()
+    root = policy.root_index
+    controller.reset(
+        reference.body_pos_w[root], reference.body_quat_w[root], reference.joint_pos,
+        joint_vel=reference.joint_vel,
+        root_lin_vel_w=reference.body_lin_vel_w[root],
+        root_ang_vel_w=reference.body_ang_vel_w[root],
+    )
+    viewer = None
+    paused = False
+    step = 0
 
-    def run(self, *, headless: bool = False, max_steps: int | None = None) -> None:
-        reference = self.policy.reset()
-        root_pos, root_quat, joint_pos = self.policy.initial_pose()
-        self.controller.reset(root_pos, root_quat, joint_pos)
-        self.controller.settle(reference.joint_pos)
+    def on_key(keycode: int) -> None:
+        nonlocal paused
+        if keycode == ord(" "):
+            paused = not paused
+
+    try:
         if not headless:
-            self.controller.launch_viewer()
+            import mujoco.viewer
+
+            viewer = mujoco.viewer.launch_passive(controller.model, controller.data, key_callback=on_key)
+            viewer.cam.elevation = -20
             print("[MuJoCo] Space: pause/resume; close the viewer to exit")
-
-        step = 0
-        try:
-            while self.controller.is_running and (max_steps is None or step < max_steps):
-                self.controller.wait_while_paused()
-                if not self.controller.is_running:
-                    break
-                start = time.monotonic()
-                targets = self.policy.infer(self.controller.read_state())
-                self.controller.step(targets)
-                self.controller.sync()
+        while max_steps is None or step < max_steps:
+            if viewer is not None and not viewer.is_running():
+                break
+            start = time.monotonic()
+            if not paused:
+                controller.step(policy.infer(controller.read_state()))
                 step += 1
-                if not headless:
-                    remaining = self.controller.robot.policy_dt - (time.monotonic() - start)
-                    if remaining > 0:
-                        time.sleep(remaining)
-        finally:
-            self.controller.close()
-
+            if viewer is not None:
+                viewer.sync()
+                time.sleep(max(0.0, controller.robot.policy_dt - (time.monotonic() - start)))
+    finally:
+        if viewer is not None:
+            viewer.close()
+    return step

@@ -41,7 +41,3 @@ def relative_orientation(current_w: np.ndarray, target_w: np.ndarray) -> np.ndar
     """Target orientation expressed in the current body frame."""
     return quat_multiply(quat_conjugate(current_w), target_w)
 
-
-def projected_gravity(q_w: np.ndarray) -> np.ndarray:
-    return quat_to_matrix(q_w).T @ np.asarray([0.0, 0.0, -1.0], dtype=np.float32)
-

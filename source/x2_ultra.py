@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # Motion command, policy action, and MuJoCo joint order.
 ACTION_JOINT_NAMES = (
@@ -22,7 +22,9 @@ ACTION_JOINT_NAMES = (
     "right_wrist_pitch_joint", "right_wrist_roll_joint", "head_yaw_joint", "head_pitch_joint",
 )
 
-# Isaac Lab articulation order. joint_pos and joint_vel policy terms use this order.
+# Isaac Lab articulation order, verified against the exported ONNX joint_names.
+# Only the robot-state joint_pos/joint_vel terms use this order. The reference
+# command and previous actions keep ACTION_JOINT_NAMES order (preserve_order=True).
 OBSERVATION_JOINT_NAMES = (
     "left_hip_pitch_joint", "right_hip_pitch_joint", "waist_yaw_joint",
     "left_hip_roll_joint", "right_hip_roll_joint", "waist_pitch_joint",
@@ -62,17 +64,13 @@ KP_BY_NAME = {
 }
 
 KD_BY_NAME = {
+    **{name: 2.0 for name in ACTION_JOINT_NAMES},
     **{name: 5.0 for name in (
         "left_hip_pitch_joint", "right_hip_pitch_joint", "left_knee_joint", "right_knee_joint")},
     **{name: 4.0 for name in (
         "left_hip_roll_joint", "right_hip_roll_joint",
         "left_hip_yaw_joint", "right_hip_yaw_joint")},
-    **{name: 2.0 for name in ACTION_JOINT_NAMES},
     **{name: 3.0 for name in ACTION_JOINT_NAMES if "shoulder" in name or "elbow" in name},
-    "left_hip_pitch_joint": 5.0, "right_hip_pitch_joint": 5.0,
-    "left_hip_roll_joint": 4.0, "right_hip_roll_joint": 4.0,
-    "left_hip_yaw_joint": 4.0, "right_hip_yaw_joint": 4.0,
-    "left_knee_joint": 5.0, "right_knee_joint": 5.0,
     "waist_yaw_joint": 2.56,
 }
 
@@ -108,14 +106,23 @@ class X2UltraConfig:
     anchor_body_name: str = "torso_link"
     root_body_name: str = "pelvis"
     scene_path: Path = PROJECT_ROOT / "assets" / "x2_ultra" / "scene.xml"
-    default_policy_path: Path = PROJECT_ROOT / "assets" / "prepare_policy.onnx"
+    default_policy_path: Path = PROJECT_ROOT / "assets" / "models" / "prepare.onnx"
     sim_dt: float = 0.005
     policy_dt: float = 0.02
-    initial_settle_seconds: float = 0.5
 
     @property
     def default_joint_pos(self) -> np.ndarray:
         return _array(DEFAULT_BY_NAME)
+
+    @property
+    def action_offset(self) -> np.ndarray:
+        # prepare.onnx requires the training event's legacy positional assignment:
+        # articulation-order defaults in action-order slots. Do not reorder these
+        # by joint name; observation defaults remain correctly joint-aligned.
+        return np.asarray(
+            [DEFAULT_BY_NAME.get(name, 0.0) for name in self.observation_joint_names],
+            dtype=np.float32,
+        )
 
     @property
     def kp(self) -> np.ndarray:
@@ -135,10 +142,7 @@ class X2UltraConfig:
 
     @property
     def decimation(self) -> int:
-        ratio = self.policy_dt / self.sim_dt
-        if not ratio.is_integer():
-            raise ValueError("policy_dt must be an integer multiple of sim_dt")
-        return int(ratio)
+        return int(self.policy_dt / self.sim_dt)
 
 
 X2_ULTRA = X2UltraConfig()

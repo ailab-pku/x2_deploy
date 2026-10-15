@@ -5,30 +5,31 @@ from pathlib import Path
 import sys
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SOURCE_DIR = PROJECT_ROOT / "source"
-if str(SOURCE_DIR) not in sys.path:
-    sys.path.insert(0, str(SOURCE_DIR))
-
-from x2_deploy.task import make_x2_beyond_mimic_task
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="X2 Ultra BeyondMimic sim-to-sim runner")
-    parser.add_argument("--policy", help="Motion-export ONNX policy (motion is embedded)")
-    parser.add_argument("--scene", help="Override the project-local MuJoCo scene")
-    parser.add_argument("--headless", action="store_true", help="Run without a viewer")
-    parser.add_argument("--max-steps", type=int, help="Stop after this many 50 Hz policy steps")
-    return parser.parse_args()
+sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def main() -> None:
-    args = parse_args()
-    task = make_x2_beyond_mimic_task(args.policy, args.scene)
-    print(f"Policy: {task.policy_path}")
-    print(f"Scene:  {task.scene_path}")
-    task.create_sim_runner().run(headless=args.headless, max_steps=args.max_steps)
+    parser = argparse.ArgumentParser(description="X2 Ultra BeyondMimic sim-to-sim runner")
+    parser.add_argument("--policy", type=Path, help="Motion-export ONNX policy (motion is embedded)")
+    parser.add_argument("--scene", type=Path, help="Override the project-local MuJoCo scene")
+    parser.add_argument("--headless", action="store_true", help="Run without a viewer")
+    parser.add_argument("--max-steps", type=int, help="Stop after this many 50 Hz policy steps")
+    args = parser.parse_args()
+
+    from source.beyond_mimic import BeyondMimicPolicy
+    from source.controller import MujocoController
+    from source.runtime import run_sim2sim
+    from source.x2_ultra import X2_ULTRA
+
+    policy_path = (args.policy or X2_ULTRA.default_policy_path).expanduser().resolve()
+    scene_path = (args.scene or X2_ULTRA.scene_path).expanduser().resolve()
+    print(f"Policy: {policy_path}")
+    print(f"Scene:  {scene_path}")
+    policy = BeyondMimicPolicy(policy_path, X2_ULTRA)
+    controller = MujocoController(X2_ULTRA, scene_path)
+    steps = run_sim2sim(controller, policy, headless=args.headless, max_steps=args.max_steps)
+    print(f"Completed {steps} policy steps ({steps * X2_ULTRA.policy_dt:.2f} s simulated)")
 
 
 if __name__ == "__main__":
     main()
-
