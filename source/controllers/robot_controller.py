@@ -41,6 +41,7 @@ class AimDKController(Node):
         self.dq = np.zeros_like(self.q)
         self.pelvis_quat, self.omega = self.heading.copy(), np.zeros(3, dtype=np.float32)
         self.publishers_by_group = {}
+        self.received = set()
         self.sequence = 0
         self.subscriptions_by_group = [
             self.create_subscription(
@@ -61,6 +62,7 @@ class AimDKController(Node):
         values = np.asarray([(joint.position, joint.velocity) for joint in samples], dtype=np.float32)
         with self.lock:
             self.q[active_ids], self.dq[active_ids] = values.T
+            self.received.add(group)
 
     def _on_imu(self, msg: Imu) -> None:
         q, w = msg.orientation, msg.angular_velocity
@@ -70,6 +72,20 @@ class AimDKController(Node):
             # Use the HAL IMU axes directly (identity mounting rotation).
             self.pelvis_quat = quat
             self.omega = omega
+            self.received.add("imu")
+
+    def wait_for_state(self, timeout: float = 10.0) -> None:
+        """Wait for one sample from every joint group and the IMU before prepare."""
+        required = set(self.groups) | {"imu"}
+        deadline = time.monotonic() + timeout
+        while True:
+            with self.lock:
+                missing = required - self.received
+            if not missing:
+                return
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"Missing HAL feedback: {', '.join(sorted(missing))}")
+            time.sleep(0.01)
 
     def read_state(self) -> RobotState:
         with self.lock:

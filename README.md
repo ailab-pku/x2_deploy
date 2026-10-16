@@ -4,7 +4,7 @@
 
 ## 运行
 
-`onnx` 用于读取内嵌 motion 的准确帧数，确保播放结束时退出。
+`onnx` 用于读取内嵌 motion 的准确帧数，确定 motion 播放结束的时刻。
 
 依赖：Python 3.10+、`numpy`、`mujoco`、`onnx`、`onnxruntime`。
 
@@ -88,8 +88,10 @@ aima em stop-app mc
 ./deploy.sh
 ```
 
-`deploy.sh` 自动加载 ROS、AIMDK、DDS 配置和已有 Python 环境，启动后直接
-过渡到 reference 第 0 帧，再进入 RL 控制。也可在已加载 ROS/SDK 的环境中直接运行：
+`deploy.sh` 自动加载 ROS、AIMDK、DDS 配置和已有 Python 环境，启动后先阻塞等待确认。
+终端输入 `y` 或 `yes` 后才进入 prepare；输入其他内容、输入结束（EOF）或 Ctrl+C 可取消，
+确认前不会创建 HAL command publisher 或发送电机命令。
+也可在已加载 ROS/SDK 的环境中直接运行：
 
 ```bash
 .venv-real/bin/python scripts/sim2real.py
@@ -104,13 +106,16 @@ IMU 直接使用 HAL 的骨盆姿态和角速度，不额外施加安装旋转�
   因此该自由度在原版机器上无法跟踪。
 - 使用 `/aima/hal/imu/torso/state`（骨盆 IMU）的局部角速度；结合腰部 yaw/pitch/roll
   正运动学得到 torso 姿态。启动时只对齐 IMU 世界系与 reference 的 yaw，保留实际 roll/pitch。
-- 默认用 3 秒从实测关节位置平滑过渡到 reference 第 0 帧，到位后才开始 50 Hz policy。
-- 从 ONNX 内嵌 motion 表读取总帧数，以 50 Hz 将第 0 帧到最后一帧各执行一次后自动退出。
-  motion 时长为帧数 × 0.02 秒，不含启动过渡和退出保持命令。
+- 确认 prepare 后等待四组关节和 IMU 首批反馈（最多 10 秒），再对齐 heading 和接管。
+  用 3 秒从实测关节位置平滑过渡到 reference 第 0 帧，随后自动开始 50 Hz policy。
+- 从 ONNX 内嵌 motion 表读取总帧数，以 50 Hz 将第 0 帧到最后一帧各执行一次。
+  播放结束后，从最后一次 policy 下发的 target 用 3 秒平滑过渡回启动时保存的第 0 帧位置，
+  然后停止 policy 推理，以 50 Hz 持续下发第 0 帧位置和原有 kp/kd，直到 Ctrl+C。
+  motion 时长为帧数 × 0.02 秒，不含 prepare、回程和保持时间。
 - 推理和正常命令下发均为 50 Hz：`position=target`、`stiffness=kp`、`damping=kd`、
   `velocity=0`、`effort=0`。底层控制器持续执行 PD；Python 不计算力矩，也不重发 200 Hz 命令。
   电机端的实际控制频率和力矩限幅由固件决定，SDK 此消息没有独立的力矩上限字段。
-- 正常结束、Ctrl+C、SIGTERM 时，取一次退出时缓存的实测关节位置，保留 kp/kd，
+- Ctrl+C 时，取一次退出时缓存的实测关节位置，保留 kp/kd，
   连续发送 0.2 秒保持命令后退出。HAL 持续保持最后命令，不再运行 policy，
   不会自动卸掉刚度，也没有动态平衡能力；运动中或单脚支撑时不能据此保证站立。
 - 退出时若未设置保持姿态，则发送 0.2 秒阻尼（`effort=stiffness=0`、`damping=kd`）。
@@ -119,4 +124,4 @@ IMU 直接使用 HAL 的骨盆姿态和角速度，不额外施加安装旋转�
 
 SDK 明确规定 HAL 无命令超时保护；SIGKILL、进程崩溃或通信断开时无法保证退出命令送达。
 
-此前版本已完成 sim2sim 和 sim2real 验证；本次入口简化仅做离线验证。
+此前版本已完成 sim2sim 和 sim2real 验证；本次交互、回程与保持流程仅做离线验证。

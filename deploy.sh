@@ -8,17 +8,17 @@ usage() {
     cat <<'EOF'
 Usage: ./deploy.sh [sim2real options]
 
-Starts preparation and RL control directly. Stop native MC on PC1 beforehand:
+Waits for confirmation before preparation. Stop native MC on PC1 beforehand:
   aima em stop-app mc
 
 Examples:
   ./deploy.sh
   ./deploy.sh --policy assets/policy.onnx
 
-Defaults: assets/policy.onnx, 3-second transition, motion to its final
-frame at 50 Hz, then exit automatically.
+Defaults: assets/policy.onnx, confirm with y, 3-second transition to frame 0,
+play motion at 50 Hz, then return to frame 0 over 3 seconds and hold until Ctrl+C.
 HAL IMU axes are used directly; no mode switching.
-Normal completion / Ctrl+C retains measured joint positions with kp/kd;
+Ctrl+C retains measured joint positions with kp/kd;
 this is position hold, not balance control. Exceptions fall back to damping.
 EOF
 }
@@ -46,5 +46,5 @@ export FASTRTPS_DEFAULT_PROFILES_FILE="${FASTRTPS_DEFAULT_PROFILES_FILE:-/agibot
 export PYTHONUNBUFFERED=1
 cd -- "$PROJECT_DIR"
 
-echo "Live control: 3-second transition to frame 0, then 50 Hz policy."
+echo "Live control: confirm prepare, play motion, return to frame 0 and hold until Ctrl+C."
 exec "$DEPLOY_PYTHON" scripts/sim2real.py "$@"

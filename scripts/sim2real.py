@@ -37,9 +37,8 @@ def main() -> None:
     print("Live: policy/targets 50 Hz, robot-side PD; original X2 Ultra")
     try:
         print(f"Motion: {policy.motion_frames} frames ({policy.motion_frames * X2_ULTRA.policy_dt:.2f} s); "
-              "exit after the final frame")
-        steps = run_sim2real(controller, policy)
-        print(f"Completed {steps} policy steps")
+              "return to frame 0 after motion and hold until Ctrl+C")
+        run_sim2real(controller, policy)
     except KeyboardInterrupt:
         print("Stopping policy; retaining measured joint pose if feedback is valid")
     finally:
