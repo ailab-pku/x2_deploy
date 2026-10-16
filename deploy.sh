@@ -6,33 +6,25 @@ DEPLOY_PYTHON="${X2_DEPLOY_PYTHON:-/agibot/data/home/agi/x2_deploy_venv/bin/pyth
 
 usage() {
     cat <<'EOF'
-Usage: ./deploy.sh [dry-run|check|live] [sim2real options]
+Usage: ./deploy.sh [sim2real options]
 
-  dry-run   Read robot feedback and infer without commands (default).
-  check     Check feedback and absence of other command publishers; read-only.
-  live      Send commands; stop native MC on PC1 beforehand:
-              aima em stop-app mc
+Starts preparation and RL control directly. Stop native MC on PC1 beforehand:
+  aima em stop-app mc
 
 Examples:
-  ./deploy.sh dry-run --max-steps 500
-  ./deploy.sh check
-  ./deploy.sh live --prepare-seconds 3
-  ./deploy.sh live --policy assets/character.onnx
+  ./deploy.sh
+  ./deploy.sh --policy assets/policy.onnx
 
-Live defaults: assets/prepare.onnx, 3-second transition, motion to its final
-frame, then track that reference with the policy at 50 Hz until Ctrl+C.
-Use --max-steps for a test limit. Identity IMU quaternion; no mode switching.
-Live refuses to start while another HAL command publisher is present.
+Defaults: assets/policy.onnx, 3-second transition, motion to its final
+frame at 50 Hz, then exit automatically.
+HAL IMU axes are used directly; no mode switching.
 Normal completion / Ctrl+C retains measured joint positions with kp/kd;
-this is position hold, not balance control. Faults fall back to damping
-unless another controller has taken ownership.
+this is position hold, not balance control. Exceptions fall back to damping.
 EOF
 }
 
-case "${1:-dry-run}" in
+case "${1:-}" in
     -h|--help|help) usage; exit 0 ;;
-    dry-run|check|live) DEPLOY_MODE="${1:-dry-run}"; if (( $# )); then shift; fi ;;
-    *) usage >&2; exit 2 ;;
 esac
 
 if [[ ! -x "$DEPLOY_PYTHON" ]]; then
@@ -54,12 +46,5 @@ export FASTRTPS_DEFAULT_PROFILES_FILE="${FASTRTPS_DEFAULT_PROFILES_FILE:-/agibot
 export PYTHONUNBUFFERED=1
 cd -- "$PROJECT_DIR"
 
-if [[ "$DEPLOY_MODE" == dry-run ]]; then
-    exec "$DEPLOY_PYTHON" scripts/sim2real.py --dry-run "$@"
-fi
-if [[ "$DEPLOY_MODE" == check ]]; then
-    exec "$DEPLOY_PYTHON" scripts/sim2real.py --check-only "$@"
-fi
-
-echo "Live control: 3-second transition to frame 0, then 50 Hz policy (unless overridden)."
+echo "Live control: 3-second transition to frame 0, then 50 Hz policy."
 exec "$DEPLOY_PYTHON" scripts/sim2real.py "$@"
