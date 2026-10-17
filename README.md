@@ -6,13 +6,13 @@
 
 ### Sim2sim
 
-![MuJoCo sim2sim 预览](assets/sim_preview.gif)
+![MuJoCo sim2sim 20 秒预览](assets/sim_preview.gif)
 
 [播放完整仿真视频](assets/sim.mp4)（约 99 秒）。
 
 ### Sim2real
 
-![X2 Ultra 真机运行预览](assets/real_preview.gif)
+![X2 Ultra 真机运行 20 秒预览](assets/real_preview.gif)
 
 [播放完整真机视频](assets/real.mp4)（约 90 秒）。
 
