@@ -44,13 +44,13 @@ def run_sim2sim(
         while step < policy.motion_frames:
             if viewer is not None and not viewer.is_running():
                 break
-            start = time.monotonic()
+            start = time.perf_counter()
             if not paused:
                 controller.step(policy.infer(controller.read_state()))
                 step += 1
             if viewer is not None:
                 viewer.sync()
-                time.sleep(max(0.0, controller.robot.policy_dt - (time.monotonic() - start)))
+                time.sleep(max(0.0, controller.robot.policy_dt - (time.perf_counter() - start)))
     finally:
         if viewer is not None:
             viewer.close()
@@ -58,68 +58,33 @@ def run_sim2sim(
 
 
 def _wait_for_next_tick(deadline: float, dt: float) -> float:
-    """Keep the normal cadence; never burst through overdue command ticks."""
+    """Keep 50 Hz; on overrun, continue immediately and rebase the clock."""
     deadline += dt
-    now = time.monotonic()
-    if deadline <= now:
-        deadline = now + dt
-    time.sleep(deadline - now)
+    while time.perf_counter() < deadline:
+        time.sleep(0.0002)
     return deadline
-
-
-def _transition_to_frame_zero(controller: AimDKController, initial, frame_zero) -> None:
-    """Use the same three-second smooth transition for prepare and return."""
-    ticks = max(1, round(PREPARE_SECONDS / controller.robot.policy_dt))
-    deadline = time.monotonic()
-    for tick in range(1, ticks + 1):
-        controller.read_state()
-        blend = tick / ticks
-        blend = blend * blend * (3.0 - 2.0 * blend)
-        controller.set_target(initial + blend * (frame_zero - initial))
-        deadline = _wait_for_next_tick(deadline, controller.robot.policy_dt)
 
 
 def run_sim2real(
     controller: AimDKController, policy: BeyondMimicPolicy,
 ) -> None:
     """Confirm, prepare, play motion, then return to frame zero until Ctrl+C."""
-    hold_on_exit = False
     try:
-        try:
-            answer = input("Enter prepare (3-second transition to motion frame 0)? [y/N]: ")
-        except EOFError:
-            answer = ""
-        if answer.strip().lower() not in ("y", "yes"):
-            print("Cancelled before prepare; no commands sent.", flush=True)
-            return
+        answer = input("Enter prepare (3-second transition to motion frame 0)? [y/N]: ")
+    except EOFError:
+        answer = ""
+    if answer.strip().lower() not in ("y", "yes"):
+        print("Cancelled before prepare; no commands sent.", flush=True)
+        return
 
-        reference = policy.reset()
-        frame_zero = policy.reference_joint_pos_xml.copy()
-        controller.wait_for_state()
-        controller.align_heading(reference.body_quat_w[policy.root_index])
-        controller.start()
-        initial = controller.read_state().joint_pos
-        print("Prepare: moving to frame 0 over 3 seconds.", flush=True)
-        _transition_to_frame_zero(controller, initial, frame_zero)
-        print("Prepare complete; running motion at 50 Hz.", flush=True)
-        deadline = time.monotonic()
-        step = 0
-        targets = frame_zero
-        while step < policy.motion_frames:
-            targets = policy.infer(controller.read_state())
-            controller.set_target(targets)
-            step += 1
-            deadline = _wait_for_next_tick(deadline, controller.robot.policy_dt)
-        print("Motion complete; returning to frame 0 over 3 seconds.", flush=True)
-        _transition_to_frame_zero(controller, targets, frame_zero)
-        print("Holding frame 0 at 50 Hz. Ctrl+C to exit.", flush=True)
-        deadline = time.monotonic()
-        while True:
-            controller.read_state()
-            controller.set_target(frame_zero)
-            deadline = _wait_for_next_tick(deadline, controller.robot.policy_dt)
-    except KeyboardInterrupt:
-        hold_on_exit = True
-        raise
-    finally:
-        controller.stop(hold_position=hold_on_exit)
+    policy.reset()
+    frame_zero = policy.reference_joint_pos_xml.copy()
+    controller.start()
+    deadline = time.perf_counter()
+    targets = frame_zero
+    while policy.frame < policy.motion_frames:
+        targets = policy.infer(controller.read_state())
+        controller.set_target(targets)
+        deadline += controller.robot.policy_dt
+        while time.perf_counter() < deadline:
+            time.sleep(0.0002)

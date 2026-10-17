@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 from functools import partial
-from threading import Lock
+from threading import Event, Lock
 import time
 
 import numpy as np
-from aimdk_msgs.msg import JointCommand, JointCommandArray, JointStateArray
+from aimdk_msgs.msg import JointCommand, JointCommandArray, JointStateArray, SmSystemState
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Imu
 
-from .. import RobotState, quat_multiply, quat_to_matrix
+from .. import RobotState, quat_multiply
 from assets.x2_ultra import X2UltraConfig
+
 
 def torso_orientation(pelvis_quat: np.ndarray, waist_pos: np.ndarray) -> np.ndarray:
     """X2 chain: pelvis -> waist yaw (Z) -> pitch (Y) -> torso roll (X)."""
@@ -26,22 +27,27 @@ def torso_orientation(pelvis_quat: np.ndarray, waist_pos: np.ndarray) -> np.ndar
 class AimDKController(Node):
     """AimDK v1.1 ROS 2 HAL adapter for the original X2 Ultra (head yaw only)."""
 
-    def __init__(self, robot: X2UltraConfig):
+    def __init__(
+        self, robot: X2UltraConfig, *,
+        state_timeout: float = 0.1,
+    ):
         super().__init__("x2_beyond_mimic")
-        self.robot = robot
+        self.robot, self.state_timeout = robot, state_timeout
         self.kp, self.kd = robot.kp, robot.kd
         self.active = np.asarray([name != "head_pitch_joint" for name in robot.joint_names])
         self.groups = {"leg": list(range(12)), "waist": list(range(12, 15)),
                        "arm": list(range(15, 29)), "head": list(range(29, 31))}
         self.waist_ids = [robot.joint_names.index(f"waist_{axis}_joint") for axis in ("yaw", "pitch", "roll")]
         self.heading = np.asarray([1, 0, 0, 0], dtype=np.float32)
-        self.lock = Lock()
-        self.stopping = False
+        self.lock, self.stopping = Lock(), Event()
+        self.fault: Exception | None = None
         self.q = np.zeros(len(robot.joint_names), dtype=np.float32)
         self.dq = np.zeros_like(self.q)
         self.pelvis_quat, self.omega = self.heading.copy(), np.zeros(3, dtype=np.float32)
+        self.received = {key: 0.0 for key in (*self.groups, "imu", "mode")}
+        self.mode, self.mode_status = "", 0
+        self.discovery_started = time.perf_counter()
         self.publishers_by_group = {}
-        self.received = set()
         self.sequence = 0
         self.subscriptions_by_group = [
             self.create_subscription(
@@ -51,6 +57,9 @@ class AimDKController(Node):
         ]
         self.imu_subscription = self.create_subscription(
             Imu, "/aima/hal/imu/torso/state", self._on_imu, qos_profile_sensor_data,
+        )
+        self.mode_subscription = self.create_subscription(
+            SmSystemState, "/aima/sm/system_state", self._on_mode, qos_profile_sensor_data,
         )
 
     def _on_joints(self, group: str, msg: JointStateArray) -> None:
@@ -62,54 +71,36 @@ class AimDKController(Node):
         values = np.asarray([(joint.position, joint.velocity) for joint in samples], dtype=np.float32)
         with self.lock:
             self.q[active_ids], self.dq[active_ids] = values.T
-            self.received.add(group)
+            self.received[group] = time.perf_counter()
+
 
     def _on_imu(self, msg: Imu) -> None:
         q, w = msg.orientation, msg.angular_velocity
         quat = np.asarray([q.w, q.x, q.y, q.z], dtype=np.float32)
         omega = np.asarray([w.x, w.y, w.z], dtype=np.float32)
+        norm = np.linalg.norm(quat)
         with self.lock:
-            # Use the HAL IMU axes directly (identity mounting rotation).
-            self.pelvis_quat = quat
+            self.pelvis_quat = quat / norm
             self.omega = omega
-            self.received.add("imu")
+            self.received["imu"] = time.perf_counter()
 
-    def wait_for_state(self, timeout: float = 10.0) -> None:
-        """Wait for one sample from every joint group and the IMU before prepare."""
-        required = set(self.groups) | {"imu"}
-        deadline = time.monotonic() + timeout
-        while True:
-            with self.lock:
-                missing = required - self.received
-            if not missing:
-                return
-            if time.monotonic() >= deadline:
-                raise TimeoutError(f"Missing HAL feedback: {', '.join(sorted(missing))}")
-            time.sleep(0.01)
+    def _on_mode(self, msg: SmSystemState) -> None:
+        with self.lock:
+            self.mode, self.mode_status = msg.cur_state, msg.cur_status.value
+            self.received["mode"] = time.perf_counter()
+
 
     def read_state(self) -> RobotState:
-        with self.lock:
-            q, dq, omega = self.q.copy(), self.dq.copy(), self.omega.copy()
-            pelvis_quat = quat_multiply(self.heading, self.pelvis_quat)
+        q, dq, omega = self.q.copy(), self.dq.copy(), self.omega.copy()
+        pelvis_quat = quat_multiply(self.heading, self.pelvis_quat)
         return RobotState(q, dq, omega, torso_orientation(pelvis_quat, q[self.waist_ids]))
-
-    def align_heading(self, reference_root_quat: np.ndarray) -> None:
-        with self.lock:
-            reference = quat_to_matrix(reference_root_quat)
-            current = quat_to_matrix(self.pelvis_quat)
-            yaw = np.arctan2(reference[1, 0], reference[0, 0]) - np.arctan2(current[1, 0], current[0, 0])
-            self.heading = np.asarray([np.cos(yaw / 2), 0, 0, np.sin(yaw / 2)], dtype=np.float32)
 
     def set_target(self, targets: np.ndarray) -> None:
         """Publish one position/PD command per policy tick; the robot computes torque."""
         targets = np.asarray(targets, dtype=np.float32)
-        if self.stopping:
-            raise RuntimeError("Real control has stopped")
         self._publish(targets)
 
     def start(self) -> None:
-        if self.publishers_by_group:
-            raise RuntimeError("Real control has already started")
         self.publishers_by_group = {
             group: self.create_publisher(
                 JointCommandArray, f"/aima/hal/joint/{group}/command", qos_profile_sensor_data,
@@ -131,22 +122,3 @@ class AimDKController(Node):
                 joint.damping = float(self.kd[i]) if self.active[i] else 0.0
                 msg.joints.append(joint)
             self.publishers_by_group[group].publish(msg)
-
-    def stop(self, *, hold_position: bool = False) -> None:
-        if self.stopping:
-            return
-        self.stopping = True
-        with self.lock:
-            targets = self.q.copy() if hold_position else np.zeros_like(self.q)
-        if not self.publishers_by_group:
-            return
-        try:
-            for _ in range(round(0.2 / self.robot.policy_dt)):
-                self._publish(targets, damping=not hold_position)
-                time.sleep(self.robot.policy_dt)
-            self.get_logger().info(
-                "Exit: HAL retains measured joint positions with kp/kd (no balance control)"
-                if hold_position else "Exit: damping command sent"
-            )
-        except Exception as exc:
-            self.get_logger().error(f"Could not publish exit command: {exc}")
